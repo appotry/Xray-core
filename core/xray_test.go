@@ -3,8 +3,6 @@ package core_test
 import (
 	"testing"
 
-	"github.com/golang/protobuf/proto"
-
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
@@ -20,6 +18,7 @@ import (
 	"github.com/xtls/xray-core/proxy/vmess"
 	"github.com/xtls/xray-core/proxy/vmess/outbound"
 	"github.com/xtls/xray-core/testing/servers/tcp"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestXrayDependency(t *testing.T) {
@@ -57,9 +56,7 @@ func TestXrayClose(t *testing.T) {
 				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
 					Address: net.NewIPOrDomain(net.LocalHostIP),
 					Port:    uint32(0),
-					NetworkList: &net.NetworkList{
-						Network: []net.Network{net.Network_TCP, net.Network_UDP},
-					},
+					Networks: []net.Network{net.Network_TCP},
 				}),
 			},
 		},

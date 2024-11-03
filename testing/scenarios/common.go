@@ -11,9 +11,8 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"testing"
 	"time"
-
-	"github.com/golang/protobuf/proto"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/app/proxyman"
@@ -25,6 +24,7 @@ import (
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/units"
 	core "github.com/xtls/xray-core/core"
+	"google.golang.org/protobuf/proto"
 )
 
 func xor(b []byte) []byte {
@@ -234,4 +234,21 @@ func testTCPConn2(conn net.Conn, payloadSize int, timeout time.Duration) func() 
 
 		return nil
 	}
+}
+
+func WaitConnAvailableWithTest(t *testing.T, testFunc func() error) bool {
+	for i := 1; ; i++ {
+		if i > 10 {
+			t.Log("All attempts failed to test tcp conn")
+			return false
+		}
+		time.Sleep(time.Millisecond * 10)
+		if err := testFunc(); err != nil {
+			t.Log("err ", err)
+		} else {
+			t.Log("success with", i, "attempts")
+			break
+		}
+	}
+	return true
 }
