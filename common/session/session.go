@@ -4,7 +4,6 @@ package session // import "github.com/xtls/xray-core/common/session"
 import (
 	"context"
 	"math/rand"
-	"sync"
 
 	c "github.com/xtls/xray-core/common/ctx"
 	"github.com/xtls/xray-core/common/errors"
@@ -37,6 +36,8 @@ func ExportIDToError(ctx context.Context) errors.ExportOption {
 type Inbound struct {
 	// Source address of the inbound connection.
 	Source net.Destination
+	// Local address of the inbound connection.
+	Local net.Destination
 	// Gateway address.
 	Gateway net.Destination
 	// Tag of the inbound proxy that handles the connection.
@@ -45,6 +46,8 @@ type Inbound struct {
 	Name string
 	// User is the user that authenticates for the inbound. May be nil if the protocol allows anonymous traffic.
 	User *protocol.MemoryUser
+	// VlessRoute is the user-sent VLESS UUID's last byte.
+	VlessRoute net.Port
 	// Conn is actually internet.Connection. May be nil.
 	Conn net.Conn
 	// Timer of the inbound buf copier. May be nil.
@@ -75,8 +78,8 @@ type Outbound struct {
 
 // SniffingRequest controls the behavior of content sniffing.
 type SniffingRequest struct {
-	ExcludeForDomain               []string
-	OverrideDestinationForProtocol []string
+	ExcludeForDomain               []string // read-only once set
+	OverrideDestinationForProtocol []string // read-only once set
 	Enabled                        bool
 	MetadataOnly                   bool
 	RouteOnly                      bool
@@ -92,10 +95,6 @@ type Content struct {
 	Attributes map[string]string
 
 	SkipDNSResolve bool
-
-	mu sync.Mutex
-
-	isLocked bool
 }
 
 // Sockopt is the settings for socket connection.
@@ -104,22 +103,8 @@ type Sockopt struct {
 	Mark int32
 }
 
-// Some how when using mux, there will be a same ctx between different requests
-// This will cause problem as it's designed for single request, like concurrent map writes
-// Add a Mutex as a temp solution
-
 // SetAttribute attaches additional string attributes to content.
 func (c *Content) SetAttribute(name string, value string) {
-	if c.isLocked {
-		errors.LogError(context.Background(), "Multiple goroutines are tring to access one routing content, tring to write ", name, ":", value)
-	}
-	c.mu.Lock()
-	c.isLocked = true
-	defer func() {
-		c.isLocked = false
-		c.mu.Unlock()
-	}()
-
 	if c.Attributes == nil {
 		c.Attributes = make(map[string]string)
 	}
@@ -128,24 +113,8 @@ func (c *Content) SetAttribute(name string, value string) {
 
 // Attribute retrieves additional string attributes from content.
 func (c *Content) Attribute(name string) string {
-	c.mu.Lock()
-	c.isLocked = true
-	defer func() {
-		c.isLocked = false
-		c.mu.Unlock()
-	}()
 	if c.Attributes == nil {
 		return ""
 	}
 	return c.Attributes[name]
-}
-
-func (c *Content) AttributeLen() int {
-	c.mu.Lock()
-	c.isLocked = true
-	defer func() {
-		c.isLocked = false
-		c.mu.Unlock()
-	}()
-	return len(c.Attributes)
 }

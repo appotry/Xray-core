@@ -48,9 +48,7 @@ func TestXrayConfig(t *testing.T) {
 					"streamSettings": {
 						"network": "ws",
 						"wsSettings": {
-							"headers": {
-								"host": "example.domain"
-							},
+							"host": "example.domain",
 							"path": ""
 						},
 						"tlsSettings": {
@@ -79,7 +77,6 @@ func TestXrayConfig(t *testing.T) {
 							"ip": [
 								"10.0.0.0/8"
 							],
-							"type": "field",
 							"outboundTag": "blocked"
 						}
 					]
@@ -139,9 +136,6 @@ func TestXrayConfig(t *testing.T) {
 										ProtocolName: "websocket",
 										Settings: serial.ToTypedMessage(&websocket.Config{
 											Host: "example.domain",
-											Header: map[string]string{
-												"host": "example.domain",
-											},
 										}),
 									},
 								},

@@ -23,7 +23,9 @@ func Must(err error) {
 }
 
 // Must2 panics if the second parameter is not nil, otherwise returns the first parameter.
-func Must2(v interface{}, err error) interface{} {
+// This is useful when function returned "sth, err" and avoid many "if err != nil"
+// Internal usage only, if user input can cause err, it must be handled
+func Must2[T any](v T, err error) T {
 	Must(err)
 	return v
 }
@@ -38,7 +40,7 @@ func Error2(v interface{}, err error) error {
 func envFile() (string, error) {
 	if file := os.Getenv("GOENV"); file != "" {
 		if file == "off" {
-			return "", fmt.Errorf("GOENV=off")
+			return "", errors.New("GOENV=off")
 		}
 		return file, nil
 	}
@@ -47,7 +49,7 @@ func envFile() (string, error) {
 		return "", err
 	}
 	if dir == "" {
-		return "", fmt.Errorf("missing user-config dir")
+		return "", errors.New("missing user-config dir")
 	}
 	return filepath.Join(dir, "go", "env"), nil
 }
@@ -60,7 +62,7 @@ func GetRuntimeEnv(key string) (string, error) {
 		return "", err
 	}
 	if file == "" {
-		return "", fmt.Errorf("missing runtime env file")
+		return "", errors.New("missing runtime env file")
 	}
 	var data []byte
 	var runtimeEnv string

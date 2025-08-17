@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	goerrors "errors"
+	"github.com/xtls/xray-core/common/dice"
 	"io"
 	"math/big"
 	gonet "net"
@@ -16,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/common/mux"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
+	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/outbound"
@@ -27,6 +29,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"github.com/xtls/xray-core/transport/pipe"
+	"google.golang.org/protobuf/proto"
 )
 
 func getStatCounter(v *core.Instance, tag string) (stats.Counter, stats.Counter) {
@@ -59,6 +62,7 @@ type Handler struct {
 	tag             string
 	senderSettings  *proxyman.SenderConfig
 	streamSettings  *internet.MemoryStreamConfig
+	proxyConfig     proto.Message
 	proxy           proxy.Outbound
 	outboundManager outbound.Manager
 	mux             *mux.ClientManager
@@ -101,6 +105,7 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 	if err != nil {
 		return nil, err
 	}
+	h.proxyConfig = proxyConfig
 
 	rawProxyHandler, err := common.CreateObject(ctx, proxyConfig)
 	if err != nil {
@@ -173,6 +178,25 @@ func (h *Handler) Tag() string {
 func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
+	content := session.ContentFromContext(ctx)
+	if h.senderSettings != nil && h.senderSettings.TargetStrategy.HasStrategy() && ob.Target.Address.Family().IsDomain() && (content == nil || !content.SkipDNSResolve) {
+		ips, err := internet.LookupForIP(ob.Target.Address.Domain(), h.senderSettings.TargetStrategy, nil)
+		if err != nil {
+			errors.LogInfoInner(ctx, err, "failed to resolve ip for target ", ob.Target.Address.Domain())
+			if h.senderSettings.TargetStrategy.ForceIP() {
+				err := errors.New("failed to resolve ip for target ", ob.Target.Address.Domain()).Base(err)
+				session.SubmitOutboundErrorToOriginator(ctx, err)
+				common.Interrupt(link.Writer)
+				common.Interrupt(link.Reader)
+				return
+			}
+
+		} else {
+			unchangedDomain := ob.Target.Address.Domain()
+			ob.Target.Address = net.IPAddress(ips[dice.Roll(len(ips))])
+			errors.LogInfo(ctx, "target: ", unchangedDomain, " resolved to: ", ob.Target.Address.String())
+		}
+	}
 	if ob.Target.Network == net.Network_UDP && ob.OriginalTarget.Address != nil && ob.OriginalTarget.Address != ob.Target.Address {
 		link.Reader = &buf.EndpointOverrideReader{Reader: link.Reader, Dest: ob.Target.Address, OriginalDest: ob.OriginalTarget.Address}
 		link.Writer = &buf.EndpointOverrideWriter{Writer: link.Writer, Dest: ob.Target.Address, OriginalDest: ob.OriginalTarget.Address}
@@ -184,6 +208,7 @@ func (h *Handler) Dispatch(ctx context.Context, link *transport.Link) {
 				session.SubmitOutboundErrorToOriginator(ctx, err)
 				errors.LogInfo(ctx, err.Error())
 				common.Interrupt(link.Writer)
+				common.Interrupt(link.Reader)
 			}
 		}
 		if ob.Target.Network == net.Network_UDP && ob.Target.Port == 443 {
@@ -241,7 +266,9 @@ func (h *Handler) DestIpAddress() net.IP {
 // Dial implements internet.Dialer.
 func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connection, error) {
 	if h.senderSettings != nil {
+
 		if h.senderSettings.ProxySettings.HasTag() {
+
 			tag := h.senderSettings.ProxySettings.Tag
 			handler := h.outboundManager.GetHandler(tag)
 			if handler != nil {
@@ -270,13 +297,36 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 		}
 
 		if h.senderSettings.Via != nil {
+
 			outbounds := session.OutboundsFromContext(ctx)
 			ob := outbounds[len(outbounds)-1]
-			if h.senderSettings.ViaCidr == "" {
-				ob.Gateway = h.senderSettings.Via.AsAddress()
-			} else { //Get a random address.
-				ob.Gateway = ParseRandomIPv6(h.senderSettings.Via.AsAddress(), h.senderSettings.ViaCidr)
+			var domain string
+			addr := h.senderSettings.Via.AsAddress()
+			domain = h.senderSettings.Via.GetDomain()
+			switch {
+			case h.senderSettings.ViaCidr != "":
+				ob.Gateway = ParseRandomIP(addr, h.senderSettings.ViaCidr)
+
+			case domain == "origin":
+				if inbound := session.InboundFromContext(ctx); inbound != nil {
+					if inbound.Local.IsValid() && inbound.Local.Address.Family().IsIP() {
+						ob.Gateway = inbound.Local.Address
+						errors.LogDebug(ctx, "use inbound local ip as sendthrough: ", inbound.Local.Address.String())
+					}
+				}
+			case domain == "srcip":
+				if inbound := session.InboundFromContext(ctx); inbound != nil {
+					if inbound.Source.IsValid() && inbound.Source.Address.Family().IsIP() {
+						ob.Gateway = inbound.Source.Address
+						errors.LogDebug(ctx, "use inbound source ip as sendthrough: ", inbound.Source.Address.String())
+					}
+				}
+			//case addr.Family().IsDomain():
+			default:
+				ob.Gateway = addr
+
 			}
+
 		}
 	}
 
@@ -316,23 +366,35 @@ func (h *Handler) Start() error {
 // Close implements common.Closable.
 func (h *Handler) Close() error {
 	common.Close(h.mux)
+	common.Close(h.proxy)
 	return nil
 }
 
-func ParseRandomIPv6(address net.Address, prefix string) net.Address {
-	_, network, _ := gonet.ParseCIDR(address.IP().String() + "/" + prefix)
+// SenderSettings implements outbound.Handler.
+func (h *Handler) SenderSettings() *serial.TypedMessage {
+	return serial.ToTypedMessage(h.senderSettings)
+}
 
-	maskSize, totalBits := network.Mask.Size()
-	subnetSize := big.NewInt(1).Lsh(big.NewInt(1), uint(totalBits-maskSize))
+// ProxySettings implements outbound.Handler.
+func (h *Handler) ProxySettings() *serial.TypedMessage {
+	return serial.ToTypedMessage(h.proxyConfig)
+}
 
-	// random
-	randomBigInt, _ := rand.Int(rand.Reader, subnetSize)
+func ParseRandomIP(addr net.Address, prefix string) net.Address {
 
-	startIPBigInt := big.NewInt(0).SetBytes(network.IP.To16())
-	randomIPBigInt := big.NewInt(0).Add(startIPBigInt, randomBigInt)
+	_, ipnet, _ := gonet.ParseCIDR(addr.IP().String() + "/" + prefix)
 
-	randomIPBytes := randomIPBigInt.Bytes()
-	randomIPBytes = append(make([]byte, 16-len(randomIPBytes)), randomIPBytes...)
+	ones, bits := ipnet.Mask.Size()
+	subnetSize := new(big.Int).Lsh(big.NewInt(1), uint(bits-ones))
 
-	return net.ParseAddress(gonet.IP(randomIPBytes).String())
+	rnd, _ := rand.Int(rand.Reader, subnetSize)
+
+	startInt := new(big.Int).SetBytes(ipnet.IP)
+	rndInt := new(big.Int).Add(startInt, rnd)
+
+	rndBytes := rndInt.Bytes()
+	padded := make([]byte, len(ipnet.IP))
+	copy(padded[len(padded)-len(rndBytes):], rndBytes)
+
+	return net.ParseAddress(gonet.IP(padded).String())
 }
